@@ -1,0 +1,201 @@
+name: carga-masiva
+
+# Los puertos de infraestructura se publican solo en 127.0.0.1 para revisarlos
+# desde la maquina local sin exponerlos a la red.
+# Auth.Api, Control.Api y los workers NO publican puertos: solo se llega a
+# ellos a traves del API Gateway o de RabbitMQ.
+
+x-app-defaults: &app-defaults
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+  # ----------------------------------------------------------------
+  # Infraestructura
+  # ----------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Definir POSTGRES_DB en .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Definir POSTGRES_USER en .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Definir POSTGRES_PASSWORD en .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?Definir RABBITMQ_USER en .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Definir RABBITMQ_PASSWORD en .env}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.80
+    # master + volume + filer en un solo contenedor (suficiente para el reto)
+    command: "server -dir=/data -filer -ip=seaweedfs -ip.bind=0.0.0.0 -master.volumeSizeLimitMB=100 -master.volumePreallocate=false"
+    volumes:
+      - seaweedfs-data:/data
+    ports:
+      - "127.0.0.1:8888:8888"
+    restart: unless-stopped
+
+  mailpit:
+    # Servidor SMTP de pruebas: captura los correos y los muestra en http://localhost:8025
+    image: axllent/mailpit:latest
+    ports:
+      - "127.0.0.1:8025:8025"
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------
+  # Migraciones automaticas: se ejecuta una vez y termina
+  # ----------------------------------------------------------------
+  db-migrator:
+    build:
+      context: ./src
+      dockerfile: Services/Database.Migrator/Dockerfile
+    environment:
+      ConnectionStrings__Admin: "Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}"
+      POSTGRES_DB: ${POSTGRES_DB}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD:?Definir AUTH_DB_PASSWORD en .env}
+      CONTROL_DB_PASSWORD: ${CONTROL_DB_PASSWORD:?Definir CONTROL_DB_PASSWORD en .env}
+      BULKLOAD_DB_PASSWORD: ${BULKLOAD_DB_PASSWORD:?Definir BULKLOAD_DB_PASSWORD en .env}
+      NOTIFICATION_DB_PASSWORD: ${NOTIFICATION_DB_PASSWORD:?Definir NOTIFICATION_DB_PASSWORD en .env}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?Definir SEED_ADMIN_PASSWORD en .env}
+      SEED_OPERADOR_PASSWORD: ${SEED_OPERADOR_PASSWORD:?Definir SEED_OPERADOR_PASSWORD en .env}
+      SEED_CONSULTA_PASSWORD: ${SEED_CONSULTA_PASSWORD:?Definir SEED_CONSULTA_PASSWORD en .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  # ----------------------------------------------------------------
+  # Microservicios
+  # ----------------------------------------------------------------
+  auth-api:
+    <<: *app-defaults
+    build:
+      context: ./src
+      dockerfile: Services/Auth.Api/Dockerfile
+    environment:
+      ConnectionStrings__AuthDb: "Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=auth_svc;Password=${AUTH_DB_PASSWORD}"
+      Jwt__Key: ${JWT_KEY:?Definir JWT_KEY en .env}
+      # En local se usa http; en produccion (HTTPS) debe ir en true
+      Jwt__RefreshCookieSecure: "false"
+    depends_on:
+      db-migrator:
+        condition: service_completed_successfully
+
+  control-api:
+    <<: *app-defaults
+    build:
+      context: ./src
+      dockerfile: Services/Control.Api/Dockerfile
+    environment:
+      ConnectionStrings__ControlDb: "Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=control_svc;Password=${CONTROL_DB_PASSWORD}"
+      Jwt__Key: ${JWT_KEY}
+      Upload__MaxFileSizeMB: ${UPLOAD_MAX_FILE_SIZE_MB:-10}
+      RabbitMq__Username: ${RABBITMQ_USER}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD}
+      SeaweedFs__FilerUrl: http://seaweedfs:8888/
+    depends_on:
+      db-migrator:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+
+  bulkload-worker:
+    <<: *app-defaults
+    build:
+      context: ./src
+      dockerfile: Services/BulkLoad.Worker/Dockerfile
+    environment:
+      ConnectionStrings__BulkLoadDb: "Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=bulkload_svc;Password=${BULKLOAD_DB_PASSWORD}"
+      RabbitMq__Username: ${RABBITMQ_USER}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD}
+      SeaweedFs__FilerUrl: http://seaweedfs:8888/
+    depends_on:
+      db-migrator:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+
+  notification-worker:
+    <<: *app-defaults
+    build:
+      context: ./src
+      dockerfile: Services/Notification.Worker/Dockerfile
+    environment:
+      ConnectionStrings__NotificationDb: "Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=notification_svc;Password=${NOTIFICATION_DB_PASSWORD}"
+      RabbitMq__Username: ${RABBITMQ_USER}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD}
+      Smtp__Host: mailpit
+      Smtp__Port: "1025"
+      Smtp__UseStartTls: "false"
+      Smtp__FromAddress: ${SMTP_FROM_ADDRESS:?Definir SMTP_FROM_ADDRESS en .env}
+    depends_on:
+      db-migrator:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+
+  gateway:
+    <<: *app-defaults
+    build:
+      context: ./src
+      dockerfile: Services/Gateway.Api/Dockerfile
+    environment:
+      Jwt__Key: ${JWT_KEY}
+      Upload__MaxFileSizeMB: ${UPLOAD_MAX_FILE_SIZE_MB:-10}
+      Cors__AllowedOrigins__0: http://localhost:3000
+    ports:
+      - "127.0.0.1:5000:8080"
+    depends_on:
+      - auth-api
+      - control-api
+
+  # ----------------------------------------------------------------
+  # Cliente web
+  # ----------------------------------------------------------------
+  client:
+    <<: *app-defaults
+    build:
+      context: ./client
+      args:
+        VITE_API_URL: http://localhost:5000
+    ports:
+      - "127.0.0.1:3000:8080"
+    depends_on:
+      - gateway
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
+  seaweedfs-data:

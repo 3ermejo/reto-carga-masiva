@@ -1,0 +1,15 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+TestResults/
+
+# Node / React
+node_modules/
+dist/
+
+# Variables de entorno con secretos
+.env
