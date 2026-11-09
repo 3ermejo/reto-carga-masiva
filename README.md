@@ -1,5 +1,7 @@
 # Reto Técnico – Microservicios de Carga Masiva
 
+🎥 **Video de demostración:** [ver en Google Drive](https://drive.google.com/file/d/12mzIUmMIjVNcM6Fl-A-r8ImMkHiI9W6V/view?usp=sharing)
+
 Sistema distribuido para la **carga masiva de productos desde archivos Excel (.xlsx)**. El archivo se sube desde un cliente React, se guarda en **SeaweedFS**, se procesa de forma asíncrona mediante colas de **RabbitMQ**, se persiste en **PostgreSQL** y al terminar se notifica al usuario por correo con **MailKit**.
 
 Todo está construido en **.NET 10** y se levanta con un solo `docker compose up`.
@@ -371,9 +373,10 @@ Cubren: lectura del Excel del reto (200 filas), limpieza y validación de filas,
 - Proceso de conciliación que detecte cargas que lleven demasiado tiempo en Pendiente y archivos de SeaweedFS sin carga asociada.
 - HTTPS/TLS en el Gateway (o en un ingress) y HSTS.
 - Cookie del refresh token con `Secure=true` (requiere HTTPS; en local va en `false`).
-- Notificaciones en tiempo real con SignalR en lugar de polling.
+- Notificaciones en tiempo real con SignalR en lugar de polling: con muchos usuarios, el servidor avisa los cambios de estado en vez de recibir una consulta cada 3 segundos por pantalla abierta.
+- Caché (HybridCache o Redis) para las consultas de cargas **finalizadas**: su detalle, registros y fallidos ya no cambian, así que se pueden cachear sin riesgo. Los estados de las cargas en curso no se cachean porque cambian cada segundo.
 - Pruebas de integración con Testcontainers.
-- Observabilidad con OpenTelemetry (trazas distribuidas) y health checks de Docker para los servicios .NET.
+- Observabilidad: centralizar los logs (ya salen en JSON con `IdCarga` y `CorrelationId`) en ELK (Elasticsearch + Kibana), Seq o Grafana Loki, sin cambiar código; trazas distribuidas con OpenTelemetry; alertas ante muchos logins fallidos; y health checks de Docker para los servicios .NET.
 - SeaweedFS con master, volume y filer separados y replicación.
 
 ---
